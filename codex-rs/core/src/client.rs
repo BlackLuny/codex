@@ -65,9 +65,12 @@ impl ModelClient {
     /// Dispatches to either the Responses or Chat implementation depending on
     /// the provider config.  Public callers always invoke `stream()` – the
     /// specialised helpers are private to avoid accidental misuse.
-    pub async fn stream(&self, prompt: &Prompt) -> Result<ResponseStream> {
+    pub async fn stream(
+        &self,
+        prompt: &Prompt,
+    ) -> Result<Box<dyn Stream<Item = Result<ResponseEvent>> + Unpin + Send + 'static + Sync>> {
         match self.provider.wire_api {
-            WireApi::Responses => self.stream_responses(prompt).await,
+            WireApi::Responses => Ok(Box::new(self.stream_responses(prompt).await?)),
             WireApi::Chat => {
                 // Create the raw streaming connection first.
                 let response_stream =
@@ -77,23 +80,9 @@ impl ModelClient {
                 // Wrap it with the aggregation adapter so callers see *only*
                 // the final assistant message per turn (matching the
                 // behaviour of the Responses API).
-                let mut aggregated = response_stream.aggregate();
+                let aggregated = response_stream.aggregate();
 
-                // Bridge the aggregated stream back into a standard
-                // `ResponseStream` by forwarding events through a channel.
-                let (tx, rx) = mpsc::channel::<Result<ResponseEvent>>(16);
-
-                tokio::spawn(async move {
-                    use futures::StreamExt;
-                    while let Some(ev) = aggregated.next().await {
-                        // Exit early if receiver hung up.
-                        if tx.send(ev).await.is_err() {
-                            break;
-                        }
-                    }
-                });
-
-                Ok(ResponseStream { rx_event: rx })
+                Ok(Box::new(aggregated))
             }
         }
     }

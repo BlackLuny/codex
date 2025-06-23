@@ -1069,7 +1069,7 @@ async fn try_run_turn(
     sub_id: &str,
     prompt: &Prompt,
 ) -> CodexResult<Vec<ProcessedResponseItem>> {
-    let mut stream = sess.client.clone().stream(prompt).await?;
+    let mut stream = sess.client.stream(prompt).await?;
 
     // Buffer all the incoming messages from the stream first, then execute them.
     // If we execute a function call in the middle of handling the stream, it can time out.
