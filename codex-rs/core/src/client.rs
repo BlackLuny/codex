@@ -157,7 +157,7 @@ impl ModelClient {
                     // negligible.
                     if !(status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()) {
                         // Surface the error body to callers. Use `unwrap_or_default` per Clippy.
-                        let body = (res.text().await).unwrap_or_default();
+                        let body = res.text().await.unwrap_or_default();
                         return Err(CodexErr::UnexpectedStatus(status, body));
                     }
 
@@ -196,6 +196,9 @@ struct SseEvent {
     response: Option<Value>,
     item: Option<Value>,
 }
+
+#[derive(Debug, Deserialize)]
+struct ResponseCreated {}
 
 #[derive(Debug, Deserialize)]
 struct ResponseCompleted {
@@ -324,6 +327,11 @@ where
                     return;
                 }
             }
+            "response.created" => {
+                if event.response.is_some() {
+                    let _ = tx_event.send(Ok(ResponseEvent::Created {})).await;
+                }
+            }
             // Final response completed – includes array of output items & id
             "response.completed" => {
                 if let Some(resp_val) = event.response {
@@ -339,7 +347,6 @@ where
                 };
             }
             "response.content_part.done"
-            | "response.created"
             | "response.function_call_arguments.delta"
             | "response.in_progress"
             | "response.output_item.added"
