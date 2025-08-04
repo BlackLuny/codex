@@ -76,12 +76,9 @@ impl ModelClient {
     /// Dispatches to either the Responses or Chat implementation depending on
     /// the provider config.  Public callers always invoke `stream()` – the
     /// specialised helpers are private to avoid accidental misuse.
-    pub async fn stream(
-        &self,
-        prompt: &Prompt,
-    ) -> Result<Box<dyn Stream<Item = Result<ResponseEvent>> + Unpin + Send + 'static + Sync>> {
+    pub async fn stream(&self, prompt: &Prompt) -> Result<ResponseStream> {
         match self.provider.wire_api {
-            WireApi::Responses => Ok(Box::new(self.stream_responses(prompt).await?)),
+            WireApi::Responses => self.stream_responses(prompt).await,
             WireApi::Chat => {
                 // Create the raw streaming connection first.
                 let response_stream = stream_chat_completions(
@@ -96,9 +93,29 @@ impl ModelClient {
                 // Wrap it with the aggregation adapter so callers see *only*
                 // the final assistant message per turn (matching the
                 // behaviour of the Responses API).
-                let aggregated = response_stream.aggregate();
+                let mut aggregated = if self.config.show_reasoning_content
+                    && !self.config.hide_agent_reasoning
+                {
+                    crate::chat_completions::AggregatedChatStream::streaming_mode(response_stream)
+                } else {
+                    response_stream.aggregate()
+                };
 
-                Ok(Box::new(aggregated))
+                // Bridge the aggregated stream back into a standard
+                // `ResponseStream` by forwarding events through a channel.
+                let (tx, rx) = mpsc::channel::<Result<ResponseEvent>>(16);
+
+                tokio::spawn(async move {
+                    use futures::StreamExt;
+                    while let Some(ev) = aggregated.next().await {
+                        // Exit early if receiver hung up.
+                        if tx.send(ev).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+
+                Ok(ResponseStream { rx_event: rx })
             }
         }
     }
@@ -427,7 +444,7 @@ async fn process_sse<S>(
                     }
                 }
             }
-            "response.reasoning_summary_text.delta" => {
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 if let Some(delta) = event.delta {
                     let event = ResponseEvent::ReasoningSummaryDelta(delta);
                     if tx_event.send(Ok(event)).await.is_err() {
